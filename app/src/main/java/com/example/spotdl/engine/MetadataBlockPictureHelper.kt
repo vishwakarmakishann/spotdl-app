@@ -10,21 +10,13 @@ import java.nio.ByteOrder
 /**
  * Standard FLAC Picture Block (RFC VorbisComment METADATA_BLOCK_PICTURE) builder.
  * Matches exact mutagen.flac.Picture specification used by the reference CLI engine.
+ * Full fidelity: preserves original high-resolution artwork without downscaling or capping.
  */
 object MetadataBlockPictureHelper {
 
     /**
      * Constructs a base64-encoded VorbisComment METADATA_BLOCK_PICTURE string.
-     *
-     * Format (Big Endian):
-     * - Picture Type (32-bit int): 3 = Front Cover
-     * - MIME Length (32-bit int) + MIME string (ASCII)
-     * - Description Length (32-bit int) + Description string (UTF-8)
-     * - Width (32-bit int)
-     * - Height (32-bit int)
-     * - Color Depth (32-bit int)
-     * - Number of Colors (32-bit int, 0 for non-indexed)
-     * - Picture Data Length (32-bit int) + Picture raw bytes
+     * Preserves full native resolution and bitstream fidelity.
      */
     fun buildMetadataBlockPicture(
         imageBytes: ByteArray,
@@ -35,7 +27,7 @@ object MetadataBlockPictureHelper {
         val mimeBytes = mimeType.toByteArray(Charsets.US_ASCII)
         val descBytes = description.toByteArray(Charsets.UTF_8)
 
-        // Try reading image dimensions if possible
+        // Read image dimensions if available
         var width = 0
         var height = 0
         var depth = 24
@@ -69,31 +61,28 @@ object MetadataBlockPictureHelper {
     }
 
     /**
-     * Checks if image is square (within tolerance) and compresses to JPEG bytes if needed.
+     * Ensures image is a 1:1 square.
+     * If the image is already square, returns original bytes directly with zero recompression or quality loss.
+     * If not square (e.g. 16:9 video thumbnail fallback), center-crops to square at full native resolution.
      */
-    fun ensureSquareJpeg(imageBytes: ByteArray, maxSize: Int = 1400): ByteArray {
+    fun ensureSquareJpeg(imageBytes: ByteArray): ByteArray {
         val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size) ?: return imageBytes
         val width = bitmap.width
         val height = bitmap.height
 
-        val squareBitmap = if (width != height) {
-            val minEdge = minOf(width, height)
-            val xOffset = (width - minEdge) / 2
-            val yOffset = (height - minEdge) / 2
-            Bitmap.createBitmap(bitmap, xOffset, yOffset, minEdge, minEdge)
-        } else {
-            bitmap
+        if (width == height) {
+            // Already a true 1:1 square master cover art: keep original raw bytes directly
+            return imageBytes
         }
 
-        val scaledBitmap = if (squareBitmap.width > maxSize) {
-            Bitmap.createScaledBitmap(squareBitmap, maxSize, maxSize, true)
-        } else {
-            squareBitmap
-        }
+        // Center crop without downscaling to keep full resolution
+        val minEdge = minOf(width, height)
+        val xOffset = (width - minEdge) / 2
+        val yOffset = (height - minEdge) / 2
+        val squareBitmap = Bitmap.createBitmap(bitmap, xOffset, yOffset, minEdge, minEdge)
 
         val out = ByteArrayOutputStream()
-        scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+        squareBitmap.compress(Bitmap.CompressFormat.JPEG, 98, out)
         return out.toByteArray()
     }
 }
-

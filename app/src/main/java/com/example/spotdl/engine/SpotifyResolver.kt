@@ -13,6 +13,12 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 
+data class ParsedSpotifyLink(
+    val type: String,
+    val id: String,
+    val queryParams: String? = null
+)
+
 object SpotifyResolver {
     private const val TAG = "SpotifyResolver"
     private const val USER_AGENT_CRAWLER =
@@ -48,13 +54,13 @@ object SpotifyResolver {
     suspend fun resolve(rawUrlOrText: String): CollectionMetadata = withContext(Dispatchers.IO) {
         val extracted = extractUrl(rawUrlOrText) ?: rawUrlOrText
         val canonicalUrl = normalizeSpotifyUrl(extracted)
-        val (type, id) = parseLinkType(canonicalUrl)
+        val parsed = parseLink(canonicalUrl)
 
-        Log.d(TAG, "Resolving Spotify $type with ID: $id")
+        Log.d(TAG, "Resolving Spotify ${parsed.type} with ID: ${parsed.id}")
 
-        when (type) {
+        when (parsed.type) {
             "track" -> {
-                val track = fetchSpotifyTrack(id)
+                val track = fetchSpotifyTrack(parsed.id)
                 CollectionMetadata(
                     title = track.title,
                     type = CollectionType.TRACK,
@@ -64,9 +70,9 @@ object SpotifyResolver {
                     tracks = listOf(track)
                 )
             }
-            "album" -> fetchSpotifyCollection("album", id)
-            "playlist" -> fetchSpotifyCollection("playlist", id)
-            else -> throw IllegalArgumentException("Unsupported Spotify entity type: $type")
+            "album" -> fetchSpotifyCollection("album", parsed.id, parsed.queryParams)
+            "playlist" -> fetchSpotifyCollection("playlist", parsed.id, parsed.queryParams)
+            else -> throw IllegalArgumentException("Unsupported Spotify entity type: ${parsed.type}")
         }
     }
 
@@ -93,14 +99,17 @@ object SpotifyResolver {
             }
         }
 
-        return clean.substringBefore("?")
+        return clean
     }
 
-    private fun parseLinkType(url: String): Pair<String, String> {
-        val pattern = Pattern.compile("open\\.spotify\\.com/(track|album|playlist)/([a-zA-Z0-9]+)", Pattern.CASE_INSENSITIVE)
+    private fun parseLink(url: String): ParsedSpotifyLink {
+        val pattern = Pattern.compile("open\\.spotify\\.com/(track|album|playlist)/([a-zA-Z0-9]+)(?:\\?([^#\\s]*))?", Pattern.CASE_INSENSITIVE)
         val matcher = pattern.matcher(url)
         if (matcher.find()) {
-            return Pair(matcher.group(1)!!.lowercase(), matcher.group(2)!!)
+            val type = matcher.group(1)!!.lowercase()
+            val id = matcher.group(2)!!
+            val query = matcher.group(3)
+            return ParsedSpotifyLink(type, id, query)
         }
         throw IllegalArgumentException("Invalid or unsupported Spotify URL: $url")
     }
@@ -114,7 +123,11 @@ object SpotifyResolver {
 
         val html = executeWithRetry(request)
 
-        val ogTitle = extractMetaContent(html, "og:title") ?: "Unknown Title"
+        val ogTitle = extractMetaContent(html, "og:title")
+        if (ogTitle.isNullOrBlank() || ogTitle == "Unknown Title") {
+            throw IllegalArgumentException("This Spotify track is private, restricted, or not found.")
+        }
+
         val ogDesc = extractMetaContent(html, "og:description")
         val ogImage = extractMetaContent(html, "og:image")
         val musicArtist = extractMetaContent(html, "music:musician_description")
@@ -159,8 +172,13 @@ object SpotifyResolver {
         )
     }
 
-    private fun fetchSpotifyCollection(type: String, entityId: String): CollectionMetadata {
-        val embedUrl = "https://open.spotify.com/embed/$type/$entityId"
+    private fun fetchSpotifyCollection(type: String, entityId: String, queryParams: String? = null): CollectionMetadata {
+        val embedUrl = if (!queryParams.isNullOrBlank()) {
+            "https://open.spotify.com/embed/$type/$entityId?$queryParams"
+        } else {
+            "https://open.spotify.com/embed/$type/$entityId"
+        }
+
         val request = Request.Builder()
             .url(embedUrl)
             .header("User-Agent", USER_AGENT_BROWSER)
@@ -170,7 +188,7 @@ object SpotifyResolver {
         val scriptPattern = Pattern.compile("<script id=\"__NEXT_DATA__\" type=\"application/json\">(.*?)</script>", Pattern.DOTALL)
         val matcher = scriptPattern.matcher(html)
         if (!matcher.find()) {
-            throw IOException("Could not parse Spotify embed metadata for $type: $entityId")
+            throw IOException("Could not parse Spotify metadata for $type ($entityId). It may be private or restricted.")
         }
 
         val jsonStr = matcher.group(1)!!
@@ -180,17 +198,46 @@ object SpotifyResolver {
             ?.optJSONObject("state")
             ?.optJSONObject("data")
             ?.optJSONObject("entity")
-            ?: throw IOException("Spotify collection JSON payload missing entity node")
+            ?: throw IOException("Spotify $type information not accessible or private.")
 
         val collectionTitle = entity.optString("title", entity.optString("name", "Spotify Collection"))
         val trackListArray = entity.optJSONArray("trackList") ?: org.json.JSONArray()
 
-        // Extract largest collection cover art (images array or visualIdentity)
+        if (trackListArray.length() == 0) {
+            throw IllegalArgumentException("This Spotify $type is private or contains 0 playable tracks.")
+        }
+
+        // Extract collection cover art (check visualIdentity, coverArt, and images)
         var collectionCoverUrl: String? = null
-        val images = entity.optJSONArray("images")
-        if (images != null && images.length() > 0) {
-            val largest = images.getJSONObject(images.length() - 1)
-            collectionCoverUrl = largest.optString("url")
+
+        val visualIdentity = entity.optJSONObject("visualIdentity")
+        val visualImages = visualIdentity?.optJSONArray("image")
+        if (visualImages != null && visualImages.length() > 0) {
+            var maxDim = 0
+            for (idx in 0 until visualImages.length()) {
+                val imgObj = visualImages.getJSONObject(idx)
+                val h = imgObj.optInt("maxHeight", 0)
+                val url = imgObj.optString("url")
+                if (url.isNotBlank() && h >= maxDim) {
+                    maxDim = h
+                    collectionCoverUrl = url
+                }
+            }
+        }
+
+        if (collectionCoverUrl.isNullOrBlank()) {
+            val coverArtObj = entity.optJSONObject("coverArt")
+            val sources = coverArtObj?.optJSONArray("sources")
+            if (sources != null && sources.length() > 0) {
+                collectionCoverUrl = sources.getJSONObject(0).optString("url").takeIf { it.isNotBlank() }
+            }
+        }
+
+        if (collectionCoverUrl.isNullOrBlank()) {
+            val images = entity.optJSONArray("images")
+            if (images != null && images.length() > 0) {
+                collectionCoverUrl = images.getJSONObject(images.length() - 1).optString("url").takeIf { it.isNotBlank() }
+            }
         }
 
         val isAlbum = type.equals("album", ignoreCase = true)
@@ -216,7 +263,7 @@ object SpotifyResolver {
             }
 
             val trackNumber = i + 1
-            val trackCoverUrl = if (isAlbum) collectionCoverUrl else null
+            val trackCoverUrl = collectionCoverUrl
             val durationMs = t.optLong("duration_ms", t.optLong("duration", 0L))
             val durationSec = if (durationMs > 1000L) durationMs / 1000L else if (durationMs > 0L) durationMs else null
 
@@ -253,7 +300,7 @@ object SpotifyResolver {
         } else null
     }
 
-    private fun executeWithRetry(request: Request, retries: Int = 3): String {
+    private fun executeWithRetry(request: Request, retries: Int = 2): String {
         var lastException: Exception? = null
         for (attempt in 1..retries) {
             try {
@@ -268,10 +315,15 @@ object SpotifyResolver {
             } catch (e: Exception) {
                 lastException = e
                 Log.w(TAG, "Request failed (attempt $attempt/$retries): ${e.message}")
+                if (e.message?.contains("status: 4") == true) {
+                    throw e
+                }
             }
-            try {
-                Thread.sleep((1000 * attempt).toLong())
-            } catch (ignored: InterruptedException) {}
+            if (attempt < retries) {
+                try {
+                    Thread.sleep((500 * attempt).toLong())
+                } catch (ignored: InterruptedException) {}
+            }
         }
         throw lastException ?: IOException("Failed to fetch request after $retries retries")
     }

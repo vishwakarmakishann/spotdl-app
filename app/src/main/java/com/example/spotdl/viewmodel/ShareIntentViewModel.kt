@@ -22,7 +22,7 @@ sealed class ShareUiState {
         val previewCoverUrl: String? = null
     ) : ShareUiState()
     data class Resolved(val collection: CollectionMetadata) : ShareUiState()
-    data class Error(val message: String) : ShareUiState()
+    data class Error(val message: String, val isPrivatePlaylist: Boolean = false) : ShareUiState()
 }
 
 class ShareIntentViewModel(application: Application) : AndroidViewModel(application) {
@@ -34,7 +34,15 @@ class ShareIntentViewModel(application: Application) : AndroidViewModel(applicat
 
     fun processSharedText(text: String) {
         val extractedUrl = SpotifyResolver.extractUrl(text) ?: text.trim()
-        if (extractedUrl.isBlank()) return
+        if (extractedUrl.isBlank()) {
+            _uiState.value = ShareUiState.Error("No valid link found to process.")
+            return
+        }
+
+        if (!SpotifyResolver.isSpotifyUrl(extractedUrl)) {
+            _uiState.value = ShareUiState.Error("The shared link is not a supported Spotify track, album, or playlist.")
+            return
+        }
 
         viewModelScope.launch {
             try {
@@ -42,32 +50,53 @@ class ShareIntentViewModel(application: Application) : AndroidViewModel(applicat
                 _uiState.value = ShareUiState.Resolving(
                     url = extractedUrl,
                     stage = 1,
-                    statusMessage = "Reading shared link payload..."
+                    statusMessage = "Reading shared link..."
                 )
-                delay(300) // Brief visual cadence matching Stitch radar UX
+                delay(200)
 
                 // Stage 2: Fetching music details
                 _uiState.value = ShareUiState.Resolving(
                     url = extractedUrl,
                     stage = 2,
-                    statusMessage = "Fetching metadata & artwork..."
+                    statusMessage = "Fetching tracklist & artwork..."
                 )
 
                 val collection = SpotifyResolver.resolve(extractedUrl)
+
+                if (collection.tracks.isEmpty() || collection.totalTracks == 0) {
+                    _uiState.value = ShareUiState.Error(
+                        message = "This playlist is private or contains no playable tracks.",
+                        isPrivatePlaylist = true
+                    )
+                    return@launch
+                }
 
                 // Stage 3: Checking stream mirrors
                 _uiState.value = ShareUiState.Resolving(
                     url = extractedUrl,
                     stage = 3,
-                    statusMessage = "Verifying lossless stream mirrors...",
+                    statusMessage = "Preparing audio streams...",
                     tracksFound = collection.totalTracks,
                     previewCoverUrl = collection.coverUrl ?: collection.tracks.firstOrNull()?.coverUrl
                 )
-                delay(400)
+                delay(250)
 
                 _uiState.value = ShareUiState.Resolved(collection)
             } catch (e: Exception) {
-                _uiState.value = ShareUiState.Error(e.message ?: "Failed to resolve shared link")
+                val isPrivate = e.message?.contains("private", ignoreCase = true) == true ||
+                                e.message?.contains("status: 403") == true
+                val friendlyMessage = when {
+                    isPrivate -> "This Spotify playlist is private or restricted. Please set the playlist privacy to Public on Spotify before importing."
+                    e is java.net.UnknownHostException -> "No internet connection detected. Please verify your network."
+                    e is java.net.SocketTimeoutException -> "Network timed out while contacting Spotify servers."
+                    e.message?.contains("status: 404") == true -> "This Spotify link was not found. It may have been deleted."
+                    !e.message.isNullOrBlank() -> e.message!!
+                    else -> "Failed to resolve Spotify link. Please ensure the link is public and accessible."
+                }
+                _uiState.value = ShareUiState.Error(
+                    message = friendlyMessage,
+                    isPrivatePlaylist = isPrivate
+                )
             }
         }
     }
@@ -80,4 +109,3 @@ class ShareIntentViewModel(application: Application) : AndroidViewModel(applicat
         _uiState.value = ShareUiState.Idle
     }
 }
-

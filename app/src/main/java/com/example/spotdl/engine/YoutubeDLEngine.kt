@@ -22,7 +22,8 @@ data class ProgressTelemetry(
     val downloadedBytes: Long,
     val totalBytes: Long,
     val etaSeconds: Long,
-    val statusText: String
+    val statusText: String,
+    val coverUrl: String? = null
 )
 
 object YoutubeDLEngine {
@@ -118,6 +119,8 @@ object YoutubeDLEngine {
 
         Log.d(TAG, "Primary stream query: $primaryQuery (Format: ${formatPref.ytDlpFormat})")
 
+        val activeCoverUrl = enrichedMeta.coverUrl ?: track.coverUrl
+
         onProgress(
             ProgressTelemetry(
                 percent = 0f,
@@ -125,7 +128,8 @@ object YoutubeDLEngine {
                 downloadedBytes = 0,
                 totalBytes = 0,
                 etaSeconds = 0,
-                statusText = "Locating studio master stream..."
+                statusText = "Locating studio master stream...",
+                coverUrl = activeCoverUrl
             )
         )
 
@@ -142,7 +146,7 @@ object YoutubeDLEngine {
 
         try {
             YoutubeDL.getInstance().execute(request) { progress, etaInSeconds, line ->
-                val telemetry = parseProgressLine(progress, etaInSeconds, line)
+                val telemetry = parseProgressLine(progress, etaInSeconds, line, activeCoverUrl)
                 onProgress(telemetry)
             }
         } catch (e: Exception) {
@@ -158,7 +162,7 @@ object YoutubeDLEngine {
                 addOption("-o", tempRawOutputFile.absolutePath)
             }
             YoutubeDL.getInstance().execute(fallbackRequest) { progress, etaInSeconds, line ->
-                val telemetry = parseProgressLine(progress, etaInSeconds, line)
+                val telemetry = parseProgressLine(progress, etaInSeconds, line, activeCoverUrl)
                 onProgress(telemetry)
             }
         }
@@ -258,7 +262,7 @@ object YoutubeDLEngine {
         return@withContext finalAudio
     }
 
-    private fun parseProgressLine(progress: Float, etaInSeconds: Long, line: String?): ProgressTelemetry {
+    private fun parseProgressLine(progress: Float, etaInSeconds: Long, line: String?, coverUrl: String? = null): ProgressTelemetry {
         var pct = progress
         var speedBytes: Long = 0
         var totalBytes: Long = 0
@@ -292,7 +296,8 @@ object YoutubeDLEngine {
             downloadedBytes = downloadedBytes,
             totalBytes = totalBytes,
             etaSeconds = eta,
-            statusText = if (pct >= 100f) "Finishing download..." else "Downloading audio bitstream..."
+            statusText = if (pct >= 100f) "Finishing download..." else "Downloading audio bitstream...",
+            coverUrl = coverUrl
         )
     }
 

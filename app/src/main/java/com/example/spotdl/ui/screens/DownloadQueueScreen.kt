@@ -38,6 +38,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -315,6 +316,36 @@ fun DownloadQueueScreen(
                                         )
                                     }
                                 }
+
+                                if (batchState.failedCount > 0) {
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f))
+                                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "${batchState.failedCount} track(s) failed",
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.error,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                        TextButton(
+                                            onClick = { viewModel.retryFailed() }
+                                        ) {
+                                            Text(
+                                                text = "Retry Failed",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.error
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -341,9 +372,17 @@ fun DownloadQueueScreen(
                                         contentAlignment = Alignment.Center
                                     ) {
                                         val cover = active.trackMetadata.coverUrl
-                                        if (!cover.isNullOrBlank()) {
+                                        val activeCoverModel: Any? = if (!cover.isNullOrBlank()) {
+                                            if (cover.startsWith("/")) java.io.File(cover) else cover
+                                        } else {
+                                            active.audioPath?.let { path ->
+                                                java.io.File(java.io.File(path).parentFile, "cover.jpg").takeIf { it.exists() }
+                                            }
+                                        }
+
+                                        if (activeCoverModel != null) {
                                             AsyncImage(
-                                                model = cover,
+                                                model = activeCoverModel,
                                                 contentDescription = null,
                                                 modifier = Modifier.fillMaxSize(),
                                                 contentScale = ContentScale.Crop
@@ -441,7 +480,8 @@ fun DownloadQueueScreen(
                 items(queue) { item ->
                     QueueRowItem(
                         item = item,
-                        onCancel = { viewModel.cancelTrack(item.id) }
+                        onCancel = { viewModel.cancelTrack(item.id) },
+                        onRetry = { viewModel.retryTrack(item.id) }
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                 }
@@ -457,7 +497,8 @@ fun DownloadQueueScreen(
 @Composable
 fun QueueRowItem(
     item: DownloadItem,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    onRetry: () -> Unit
 ) {
     KeylineCard(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -513,9 +554,17 @@ fun QueueRowItem(
                 contentAlignment = Alignment.Center
             ) {
                 val cover = item.trackMetadata.coverUrl
-                if (!cover.isNullOrBlank()) {
+                val itemCoverModel: Any? = if (!cover.isNullOrBlank()) {
+                    if (cover.startsWith("/")) java.io.File(cover) else cover
+                } else {
+                    item.audioPath?.let { path ->
+                        java.io.File(java.io.File(path).parentFile, "cover.jpg").takeIf { it.exists() }
+                    }
+                }
+
+                if (itemCoverModel != null) {
                     AsyncImage(
-                        model = cover,
+                        model = itemCoverModel,
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop
@@ -546,41 +595,66 @@ fun QueueRowItem(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (item.status == DownloadStatus.FAILED && !item.errorMessage.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = item.errorMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 11.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
-            // Status chip
-            Box(
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(
-                        when (item.status) {
-                            DownloadStatus.COMPLETED -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
-                            DownloadStatus.DOWNLOADING -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)
-                            DownloadStatus.FAILED -> MaterialTheme.colorScheme.errorContainer
-                            else -> MaterialTheme.colorScheme.surfaceContainer
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // Status chip / Retry Action
+            if (item.status == DownloadStatus.FAILED) {
+                IconButton(
+                    onClick = onRetry,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Retry track",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(
+                            when (item.status) {
+                                DownloadStatus.COMPLETED -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
+                                DownloadStatus.DOWNLOADING -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)
+                                else -> MaterialTheme.colorScheme.surfaceContainer
+                            }
+                        )
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = when (item.status) {
+                            DownloadStatus.COMPLETED -> "Done"
+                            DownloadStatus.DOWNLOADING -> String.format("%.0f%%", item.progressPercent)
+                            DownloadStatus.PAUSED -> "Paused"
+                            DownloadStatus.RESOLVING -> "Resolving"
+                            DownloadStatus.EMBEDDING -> "Tagging"
+                            DownloadStatus.QUEUED -> "Queued"
+                            else -> ""
+                        },
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = when (item.status) {
+                            DownloadStatus.COMPLETED -> MaterialTheme.colorScheme.primary
+                            DownloadStatus.DOWNLOADING -> MaterialTheme.colorScheme.tertiary
+                            else -> MaterialTheme.colorScheme.secondary
                         }
                     )
-                    .padding(horizontal = 8.dp, vertical = 2.dp)
-            ) {
-                Text(
-                    text = when (item.status) {
-                        DownloadStatus.COMPLETED -> "Done"
-                        DownloadStatus.DOWNLOADING -> String.format("%.0f%%", item.progressPercent)
-                        DownloadStatus.FAILED -> "Failed"
-                        DownloadStatus.PAUSED -> "Paused"
-                        DownloadStatus.RESOLVING -> "Resolving"
-                        DownloadStatus.EMBEDDING -> "Tagging"
-                        DownloadStatus.QUEUED -> "Queued"
-                    },
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = when (item.status) {
-                        DownloadStatus.COMPLETED -> MaterialTheme.colorScheme.primary
-                        DownloadStatus.DOWNLOADING -> MaterialTheme.colorScheme.tertiary
-                        DownloadStatus.FAILED -> MaterialTheme.colorScheme.error
-                        else -> MaterialTheme.colorScheme.secondary
-                    }
-                )
+                }
             }
 
             if (item.status != DownloadStatus.COMPLETED) {

@@ -27,10 +27,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -89,12 +94,14 @@ fun IncomingLinkScreen(
         }
     }
 
+    val screenTitle = if (uiState is ShareUiState.Error) "Import Failed" else "Importing Link"
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Text(
-                        text = "Importing Link",
+                        text = screenTitle,
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold
                     )
@@ -174,13 +181,16 @@ fun IncomingLinkScreen(
                         modifier = Modifier
                             .size(8.dp)
                             .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary)
+                            .background(
+                                if (uiState is ShareUiState.Error) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.primary
+                            )
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "Active handshake",
+                        text = if (uiState is ShareUiState.Error) "Inspection failed" else "Active handshake",
                         fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.secondary
+                        color = if (uiState is ShareUiState.Error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary
                     )
                 }
             }
@@ -218,9 +228,9 @@ fun IncomingLinkScreen(
                         )
                     }
                     Icon(
-                        imageVector = Icons.Default.CheckCircle,
+                        imageVector = if (uiState is ShareUiState.Error) Icons.Default.ErrorOutline else Icons.Default.CheckCircle,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.tertiary,
+                        tint = if (uiState is ShareUiState.Error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
                         modifier = Modifier.size(16.dp)
                     )
                 }
@@ -228,260 +238,319 @@ fun IncomingLinkScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Editorial Headline
-            Text(
-                text = "Finding your music",
-                style = MaterialTheme.typography.headlineLarge,
-                textAlign = TextAlign.Center
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Getting song information and checking available authorized download sources.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.secondary,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 24.dp)
-            )
+            if (uiState is ShareUiState.Error) {
+                // ==================== ERROR STATE (NO RADAR) ====================
+                val err = uiState as ShareUiState.Error
+                val isPrivate = err.isPrivatePlaylist
 
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // Radar Scanner Centerpiece
-            KeylineCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp)
-            ) {
-                Column(
+                KeylineCard(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                        .padding(vertical = 8.dp)
                 ) {
-                    val infiniteTransition = rememberInfiniteTransition(label = "RadarTransition")
-                    val rotation by infiniteTransition.animateFloat(
-                        initialValue = 0f,
-                        targetValue = 360f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 4000, easing = LinearEasing),
-                            repeatMode = RepeatMode.Restart
-                        ),
-                        label = "RadarRotation"
-                    )
-
-                    Box(
-                        modifier = Modifier.size(180.dp),
-                        contentAlignment = Alignment.Center
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        // Concentric static rings
                         Box(
                             modifier = Modifier
-                                .size(170.dp)
-                                .clip(CircleShape)
-                                .border(1.dp, EditorialKeyline, CircleShape)
-                        )
-                        Box(
-                            modifier = Modifier
-                                .size(120.dp)
-                                .clip(CircleShape)
-                                .border(1.dp, EditorialKeyline, CircleShape)
-                        )
-                        Box(
-                            modifier = Modifier
-                                .size(70.dp)
-                                .clip(CircleShape)
-                                .border(1.dp, EditorialKeyline, CircleShape)
-                        )
-
-                        // Rotating scanner sweep
-                        Box(
-                            modifier = Modifier
-                                .size(170.dp)
-                                .rotate(rotation)
+                                .size(72.dp)
                                 .clip(CircleShape)
                                 .background(
-                                    Brush.sweepGradient(
-                                        colors = listOf(
-                                            Color.Transparent,
-                                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
-                                        )
-                                    )
-                                )
-                        )
-
-                        // Center artwork thumbnail
-                        val previewCover = (uiState as? ShareUiState.Resolving)?.previewCoverUrl
-                        Box(
-                            modifier = Modifier
-                                .size(64.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                                .border(1.dp, EditorialKeyline, RoundedCornerShape(8.dp)),
+                                    if (isPrivate) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f)
+                                    else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+                                ),
                             contentAlignment = Alignment.Center
                         ) {
-                            if (!previewCover.isNullOrBlank()) {
-                                AsyncImage(
-                                    model = previewCover,
-                                    contentDescription = "Cover preview",
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentScale = ContentScale.Crop
+                            Icon(
+                                imageVector = if (isPrivate) Icons.Default.Lock else Icons.Default.ErrorOutline,
+                                contentDescription = null,
+                                tint = if (isPrivate) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(36.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Text(
+                            text = if (isPrivate) "Private Playlist Detected" else "Unable to Import Content",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text(
+                            text = err.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.secondary,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 8.dp)
+                        )
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        // Helpful Troubleshooting Card
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                                .border(1.dp, EditorialKeyline, RoundedCornerShape(8.dp))
+                                .padding(12.dp)
+                        ) {
+                            Column {
+                                Text(
+                                    text = if (isPrivate) "How to download this playlist:" else "Troubleshooting tip:",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.GraphicEq,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(28.dp)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = if (isPrivate) {
+                                        "1. Open Spotify and open this playlist\n2. Tap the ⋮ menu icon\n3. Tap 'Make Public'\n4. Share the link again to Spotdl"
+                                    } else {
+                                        "Verify you have an active network connection and ensure the shared Spotify URL is accessible publicly."
+                                    },
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.secondary,
+                                    lineHeight = 16.sp
                                 )
                             }
                         }
                     }
+                }
 
-                    Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(24.dp))
 
-                    val statusMsg = (uiState as? ShareUiState.Resolving)?.statusMessage ?: "Resolving payload..."
-                    Row(
+                Button(
+                    onClick = onBack,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Back to Home")
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedButton(
+                    onClick = { viewModel.processSharedText(sharedText) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Retry Ingestion")
+                }
+            } else {
+                // ==================== RESOLVING STATE (RADAR) ====================
+                Text(
+                    text = "Finding your music",
+                    style = MaterialTheme.typography.headlineLarge,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Getting song information and checking available authorized download sources.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.secondary,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 24.dp)
+                )
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // Radar Scanner Centerpiece
+                KeylineCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                ) {
+                    Column(
                         modifier = Modifier
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.15f))
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.GraphicEq,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.tertiary,
-                            modifier = Modifier.size(13.dp)
+                        val infiniteTransition = rememberInfiniteTransition(label = "RadarTransition")
+                        val rotation by infiniteTransition.animateFloat(
+                            initialValue = 0f,
+                            targetValue = 360f,
+                            animationSpec = infiniteRepeatable(
+                                animation = tween(durationMillis = 4000, easing = LinearEasing),
+                                repeatMode = RepeatMode.Restart
+                            ),
+                            label = "RadarRotation"
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
+
+                        Box(
+                            modifier = Modifier.size(180.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            // Concentric static rings
+                            Box(
+                                modifier = Modifier
+                                    .size(170.dp)
+                                    .clip(CircleShape)
+                                    .border(1.dp, EditorialKeyline, CircleShape)
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(120.dp)
+                                    .clip(CircleShape)
+                                    .border(1.dp, EditorialKeyline, CircleShape)
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(70.dp)
+                                    .clip(CircleShape)
+                                    .border(1.dp, EditorialKeyline, CircleShape)
+                            )
+
+                            // Rotating scanner sweep
+                            Box(
+                                modifier = Modifier
+                                    .size(170.dp)
+                                    .rotate(rotation)
+                                    .clip(CircleShape)
+                                    .background(
+                                        Brush.sweepGradient(
+                                            colors = listOf(
+                                                Color.Transparent,
+                                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+                                            )
+                                        )
+                                    )
+                            )
+
+                            // Center artwork thumbnail
+                            val previewCover = (uiState as? ShareUiState.Resolving)?.previewCoverUrl
+                            Box(
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                                    .border(1.dp, EditorialKeyline, RoundedCornerShape(8.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (!previewCover.isNullOrBlank()) {
+                                    AsyncImage(
+                                        model = previewCover,
+                                        contentDescription = "Cover preview",
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.GraphicEq,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        val statusMsg = (uiState as? ShareUiState.Resolving)?.statusMessage ?: "Resolving metadata..."
                         Text(
                             text = statusMsg,
-                            color = MaterialTheme.colorScheme.tertiary,
-                            fontSize = 11.sp,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.secondary,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Pipeline Progress Steps Card
+                KeylineCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        val stage = (uiState as? ShareUiState.Resolving)?.stage ?: 1
+                        PipelineStep(
+                            isCompleted = stage >= 2,
+                            isActive = stage == 1,
+                            title = "Reading shared link",
+                            subtitle = "Link verified and decoded"
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Step 2
+                        val tracksFound = (uiState as? ShareUiState.Resolving)?.tracksFound ?: 0
+                        val step2Sub = if (tracksFound > 0) "$tracksFound tracks found · Syncing tags & artwork" else "Syncing tags, artwork & canonical codes"
+                        PipelineStep(
+                            isCompleted = stage >= 3,
+                            isActive = stage == 2,
+                            title = "Fetching music details",
+                            subtitle = step2Sub
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Step 3
+                        PipelineStep(
+                            isCompleted = false,
+                            isActive = stage == 3,
+                            title = "Checking track availability",
+                            subtitle = "Matching official studio audio streams"
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Verified Source Capsule
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainer)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Verified,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Source verified: Spotify Public Metadata",
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
                         )
                     }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Sequential Resolution Pipeline Steps
-            KeylineCard(
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "RESOLUTION PIPELINE",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.secondary,
-                            letterSpacing = 1.sp
-                        )
-                        val currentStage = (uiState as? ShareUiState.Resolving)?.stage ?: 1
-                        Text(
-                            text = "Stage $currentStage of 3",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    // Step 1
-                    val stage = (uiState as? ShareUiState.Resolving)?.stage ?: 1
-                    PipelineStep(
-                        isCompleted = stage >= 2,
-                        isActive = stage == 1,
-                        title = "Reading shared link",
-                        subtitle = "Payload decrypted successfully"
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Step 2
-                    val tracksFound = (uiState as? ShareUiState.Resolving)?.tracksFound ?: 0
-                    val step2Sub = if (tracksFound > 0) "$tracksFound tracks found · Syncing tags & artwork" else "Syncing tags, artwork & canonical codes"
-                    PipelineStep(
-                        isCompleted = stage >= 3,
-                        isActive = stage == 2,
-                        title = "Fetching music details",
-                        subtitle = step2Sub
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Step 3
-                    PipelineStep(
-                        isCompleted = false,
-                        isActive = stage == 3,
-                        title = "Checking track availability",
-                        subtitle = "Matching official studio audio streams"
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Verified Source Capsule
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainer)
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Verified,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.tertiary,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Source verified: Spotify Public Metadata",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
+                        text = "Lossless capable",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.secondary
                     )
                 }
-                Text(
-                    text = "Lossless capable",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.secondary
-                )
-            }
 
-            Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(20.dp))
 
-            // Error message if any
-            if (uiState is ShareUiState.Error) {
-                Text(
-                    text = (uiState as ShareUiState.Error).message,
-                    color = MaterialTheme.colorScheme.error,
-                    fontSize = 13.sp,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
-            }
-
-            // Cancel action
-            OutlinedButton(
-                onClick = onBack,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text("Cancel Ingestion")
+                // Cancel action
+                OutlinedButton(
+                    onClick = onBack,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Cancel Ingestion")
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -560,4 +629,3 @@ fun PipelineStep(
         }
     }
 }
-

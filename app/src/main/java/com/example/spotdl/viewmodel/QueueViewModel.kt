@@ -26,6 +26,7 @@ class QueueViewModel(application: Application) : AndroidViewModel(application) {
     fun pauseAll() = queueManager.pauseAll()
     fun resumeAll() = queueManager.resumeAll()
     fun retryFailed() = queueManager.retryFailed()
+    fun retryTrack(id: String) = queueManager.retryTrack(id)
     fun clearCompleted() = queueManager.clearCompleted()
     fun cancelQueue() = queueManager.cancelQueue()
     fun cancelTrack(id: String) = queueManager.cancelTrack(id)

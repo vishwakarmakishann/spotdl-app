@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.UUID
 
 data class BatchProgressState(
@@ -144,6 +145,16 @@ class DownloadQueueManager private constructor(private val appContext: Context) 
         triggerWorker()
     }
 
+    fun retryTrack(id: String) {
+        _queue.update { list ->
+            list.map {
+                if (it.id == id) it.copy(status = DownloadStatus.QUEUED, errorMessage = null) else it
+            }
+        }
+        updateBatchState()
+        triggerWorker()
+    }
+
     fun clearCompleted() {
         _queue.update { list ->
             list.filter { it.status != DownloadStatus.COMPLETED }
@@ -235,7 +246,8 @@ class DownloadQueueManager private constructor(private val appContext: Context) 
                                 speedBytes = telemetry.speedBytesPerSec,
                                 downloadedBytes = telemetry.downloadedBytes,
                                 totalBytes = telemetry.totalBytes,
-                                etaSeconds = telemetry.etaSeconds
+                                etaSeconds = telemetry.etaSeconds,
+                                coverUrl = telemetry.coverUrl
                             )
                             DownloadForegroundService.updateProgress(
                                 context = appContext,
@@ -247,11 +259,15 @@ class DownloadQueueManager private constructor(private val appContext: Context) 
                         }
                     }
 
+                    val companionCover = File(downloadedFile.parentFile, "cover.jpg")
+                    val finalCoverPath = if (companionCover.exists()) companionCover.absolutePath else nextItem.trackMetadata.coverUrl
+
                     _queue.update { list ->
                         list.map {
                             if (it.id == nextItem.id) {
                                 it.copy(
                                     status = DownloadStatus.COMPLETED,
+                                    trackMetadata = it.trackMetadata.copy(coverUrl = finalCoverPath ?: it.trackMetadata.coverUrl),
                                     progressPercent = 100f,
                                     audioPath = downloadedFile.absolutePath,
                                     speedBytesPerSec = 0,
@@ -262,12 +278,24 @@ class DownloadQueueManager private constructor(private val appContext: Context) 
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error downloading ${nextItem.trackMetadata.title}", e)
+                    val friendlyError = if (useRemoteServer) {
+                        if (e.message?.contains("404") == true) {
+                            "Remote server 404 (Not Found). Deploy server or disable Remote Server in Settings to use on-device engine."
+                        } else if (e is java.net.ConnectException || e is java.net.UnknownHostException) {
+                            "Cannot connect to remote server ($remoteServerUrl). Check URL or disable in Settings."
+                        } else {
+                            "Remote server error: ${e.message}"
+                        }
+                    } else {
+                        e.message ?: "Download failed"
+                    }
+
                     _queue.update { list ->
                         list.map {
                             if (it.id == nextItem.id) {
                                 it.copy(
                                     status = DownloadStatus.FAILED,
-                                    errorMessage = e.message ?: "Download failed"
+                                    errorMessage = friendlyError
                                 )
                             } else it
                         }
@@ -292,12 +320,19 @@ class DownloadQueueManager private constructor(private val appContext: Context) 
         speedBytes: Long,
         downloadedBytes: Long,
         totalBytes: Long,
-        etaSeconds: Long
+        etaSeconds: Long,
+        coverUrl: String? = null
     ) {
         _queue.update { list ->
             list.map {
                 if (it.id == id) {
+                    val updatedMeta = if (!coverUrl.isNullOrBlank() && it.trackMetadata.coverUrl != coverUrl) {
+                        it.trackMetadata.copy(coverUrl = coverUrl)
+                    } else {
+                        it.trackMetadata
+                    }
                     it.copy(
+                        trackMetadata = updatedMeta,
                         progressPercent = percent,
                         speedBytesPerSec = speedBytes,
                         downloadedBytes = downloadedBytes,
