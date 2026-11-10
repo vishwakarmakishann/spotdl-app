@@ -7,6 +7,7 @@ import tempfile
 import subprocess
 from typing import Optional, Dict, Any
 from io import BytesIO
+from http.cookiejar import MozillaCookieJar
 
 from fastapi import FastAPI, Query, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
@@ -107,14 +108,160 @@ def ensure_square_jpeg(img_bytes: bytes) -> bytes:
         return img_bytes
 
 
+def sanitize_netscape_cookies(raw_text: str) -> Optional[str]:
+    """
+    Normalizes cookies string into standard Netscape HTTP cookie format with strict tabs.
+    Returns validated cookie file text or None if empty/invalid.
+    """
+    if not raw_text or not raw_text.strip():
+        return None
+
+    lines = []
+    has_header = False
+    valid_count = 0
+
+    normalized_text = raw_text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r\n", "\n")
+
+    for line in normalized_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "Netscape HTTP Cookie File" in line:
+            has_header = True
+            lines.append("# Netscape HTTP Cookie File")
+            continue
+        if line.startswith("#"):
+            lines.append(line)
+            continue
+
+        parts = line.split()
+        if len(parts) >= 7:
+            domain, flag, path, secure, expiration, name = parts[:6]
+            value = " ".join(parts[6:])
+            lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expiration}\t{name}\t{value}")
+            valid_count += 1
+
+    if valid_count == 0:
+        return None
+
+    if not has_header:
+        lines.insert(0, "# Netscape HTTP Cookie File")
+
+    formatted = "\n".join(lines) + "\n"
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
+            tf.write(formatted)
+            temp_path = tf.name
+        cj = MozillaCookieJar(temp_path)
+        cj.load(ignore_discard=True, ignore_expires=True)
+        os.remove(temp_path)
+        return formatted
+    except Exception:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        return None
+
+
 def get_cookie_file(target_dir: str) -> Optional[str]:
     raw_cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
-    if not raw_cookies:
+    clean_cookies = sanitize_netscape_cookies(raw_cookies)
+    if not clean_cookies:
         return None
     path = os.path.join(target_dir, "youtube_cookies.txt")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(raw_cookies)
+        f.write(clean_cookies)
     return path
+
+
+def get_yt_dlp_opts(temp_dir: str, cookie_path: Optional[str] = None) -> Dict[str, Any]:
+    opts: Dict[str, Any] = {
+        "format": "141/251/bestaudio[ext=webm]/140/bestaudio/ba/b",
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "noplaylist": True,
+        "socket_timeout": 30,
+        "retries": 10,
+        "fragment_retries": 10,
+        "extractor_args": {
+            "youtube": {
+                # visionos and android_vr bypass the SABR-only experiment (issue #12482)
+                # and provide direct HTTPS Opus (251) and M4A (140) bitstreams without bot blocks.
+                "player_client": ["visionos", "android_vr", "tv_simply", "web"],
+                "player_skip": ["configs"],
+            }
+        },
+    }
+
+    node_bin = shutil.which("node")
+    if node_bin:
+        opts["js_runtimes"] = {"node": {"path": node_bin}}
+
+    if cookie_path and os.path.isfile(cookie_path):
+        opts["cookiefile"] = cookie_path
+
+    return opts
+
+
+def download_best_audio_stream(
+    clean_artist: str,
+    clean_title: str,
+    temp_dir: str,
+    cookie_path: Optional[str] = None,
+) -> str:
+    """
+    Iterates through candidate search results across topic, audio, and standard queries,
+    downloading the first playable high-fidelity audio stream.
+    """
+    queries = [
+        f"ytsearch5:{clean_artist} - {clean_title} Topic",
+        f"ytsearch5:{clean_artist} {clean_title} Audio",
+        f"ytsearch5:{clean_artist} {clean_title}",
+    ]
+
+    base_opts = get_yt_dlp_opts(temp_dir, cookie_path)
+    last_error: Optional[Exception] = None
+
+    for query in queries:
+        try:
+            with yt_dlp.YoutubeDL(base_opts) as ydl:
+                info = ydl.extract_info(query, download=False)
+                entries = info.get("entries", []) if info else []
+                if not entries:
+                    continue
+
+                for entry in entries:
+                    if not entry:
+                        continue
+                    vid_url = (
+                        entry.get("webpage_url")
+                        or entry.get("original_url")
+                        or f"https://www.youtube.com/watch?v={entry.get('id')}"
+                    )
+
+                    try:
+                        down_opts = dict(base_opts)
+                        down_opts["outtmpl"] = os.path.join(temp_dir, "raw.%(ext)s")
+                        with yt_dlp.YoutubeDL(down_opts) as dl:
+                            dl.download([vid_url])
+
+                        for f in os.listdir(temp_dir):
+                            if f.startswith("raw."):
+                                return os.path.join(temp_dir, f)
+                    except Exception as e:
+                        last_error = e
+                        continue
+        except Exception as e:
+            last_error = e
+            continue
+
+    err_msg = str(last_error) if last_error else "Audio stream extraction failed"
+    raise HTTPException(status_code=500, detail=f"Failed to download audio stream: {err_msg}")
 
 
 def process_and_package_track(
@@ -136,7 +283,7 @@ def process_and_package_track(
     final_album = album or title
     final_track_no = track_number or 1
 
-    # 1. Download cover art if available
+    # 1. Download full-resolution cover art (preserving square aspect ratio, zero downscaling)
     cover_bytes = None
     if cover_url:
         try:
@@ -149,52 +296,14 @@ def process_and_package_track(
     # 2. Fetch synced lyrics from LRCLIB
     lyrics = fetch_lyrics(title, artist, album)
 
-    # 3. Resolve & download raw audio stream with yt-dlp
-    query = f"ytsearch1:{clean_art} - {clean_tit} Topic"
-    raw_template = os.path.join(temp_dir, "raw.%(ext)s")
-
-    ydl_opts = {
-        "format": "141/251/bestaudio[ext=webm]/140/bestaudio/ba/b",
-        "outtmpl": raw_template,
-        "quiet": True,
-        "no_warnings": True,
-        "noprogress": True,
-        "noplaylist": True,
-        "socket_timeout": 30,
-        "retries": 10,
-        "fragment_retries": 10,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "ios", "web"]
-            }
-        },
-    }
-
-    node_bin = shutil.which("node")
-    if node_bin:
-        ydl_opts["js_runtimes"] = {"node": {"path": node_bin}}
-
+    # 3. Resolve & download raw audio stream with resilient multi-client yt-dlp
     cookie_path = get_cookie_file(temp_dir)
-    if cookie_path:
-        ydl_opts["cookiefile"] = cookie_path
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([query])
-    except Exception:
-        fallback_query = f"ytsearch1:{clean_art} {clean_tit} Audio"
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([fallback_query])
-
-    # Locate raw downloaded file
-    raw_file = None
-    for f in os.listdir(temp_dir):
-        if f.startswith("raw."):
-            raw_file = os.path.join(temp_dir, f)
-            break
-
-    if not raw_file or not os.path.isfile(raw_file):
-        raise HTTPException(status_code=500, detail="Failed to download audio stream from source.")
+    raw_file = download_best_audio_stream(
+        clean_artist=clean_art,
+        clean_title=clean_tit,
+        temp_dir=temp_dir,
+        cookie_path=cookie_path,
+    )
 
     raw_ext = os.path.splitext(raw_file)[1].lower().replace(".", "")
     out_ext = "opus" if target_format == "opus" else ("m4a" if target_format == "m4a" else "mp3")
