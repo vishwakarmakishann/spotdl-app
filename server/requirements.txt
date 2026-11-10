@@ -1,0 +1,8 @@
+fastapi==0.115.8
+uvicorn[standard]==0.34.0
+yt-dlp>=2025.02.19
+mutagen>=1.47.0
+requests>=2.32.3
+python-multipart>=0.0.20
+Pillow>=10.4.0
+

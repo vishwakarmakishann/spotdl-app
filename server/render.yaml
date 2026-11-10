@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: spotdl-backend
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
+
