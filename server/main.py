@@ -14,6 +14,10 @@ from pydantic import BaseModel
 import requests
 from PIL import Image
 import yt_dlp
+from mutagen.oggopus import OggOpus
+from mutagen.flac import Picture
+from mutagen.mp4 import MP4, MP4Cover
+from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC, TRCK, APIC, USLT
 
 app = FastAPI(title="spotdl-cloud-server", version="1.0.0")
 
@@ -32,18 +36,20 @@ def read_root():
     return {
         "service": "spotdl-cloud-server",
         "status": "healthy",
-        "endpoints": ["/health", "/api/resolve", "/api/download"],
+        "endpoints": ["/health", "/api/download"],
     }
 
 
 @app.get("/health")
 def health_check():
+    has_cookies = bool(os.environ.get("YOUTUBE_COOKIES", "").strip())
     return {
         "status": "ok",
         "version": "1.0.0",
         "engine": "spotdl-cloud-server",
         "has_ffmpeg": has_binary("ffmpeg"),
         "has_nodejs": has_binary("node"),
+        "has_youtube_cookies": has_cookies,
     }
 
 
@@ -101,36 +107,14 @@ def ensure_square_jpeg(img_bytes: bytes) -> bytes:
         return img_bytes
 
 
-def build_flac_picture_block(jpeg_bytes: bytes) -> str:
-    """Builds standard RFC VorbisComment METADATA_BLOCK_PICTURE base64 string."""
-    try:
-        img = Image.open(BytesIO(jpeg_bytes))
-        width, height = img.size
-    except Exception:
-        width, height = 640, 640
-
-    mime = b"image/jpeg"
-    desc = b""
-
-    buf = bytearray()
-    # 1. Picture type: 3 (Cover front)
-    buf.extend((3).to_bytes(4, byteorder="big"))
-    # 2. MIME type length & string
-    buf.extend(len(mime).to_bytes(4, byteorder="big"))
-    buf.extend(mime)
-    # 3. Description length & string
-    buf.extend(len(desc).to_bytes(4, byteorder="big"))
-    buf.extend(desc)
-    # 4. Width, height, color depth, colors used
-    buf.extend(width.to_bytes(4, byteorder="big"))
-    buf.extend(height.to_bytes(4, byteorder="big"))
-    buf.extend((24).to_bytes(4, byteorder="big"))
-    buf.extend((0).to_bytes(4, byteorder="big"))
-    # 5. Picture data length & bytes
-    buf.extend(len(jpeg_bytes).to_bytes(4, byteorder="big"))
-    buf.extend(jpeg_bytes)
-
-    return base64.b64encode(bytes(buf)).decode("ascii")
+def get_cookie_file(target_dir: str) -> Optional[str]:
+    raw_cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if not raw_cookies:
+        return None
+    path = os.path.join(target_dir, "youtube_cookies.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(raw_cookies)
+    return path
 
 
 def process_and_package_track(
@@ -152,17 +136,13 @@ def process_and_package_track(
     final_album = album or title
     final_track_no = track_number or 1
 
-    # 1. Download square cover art
-    cover_file = None
+    # 1. Download cover art if available
     cover_bytes = None
     if cover_url:
         try:
             r = requests.get(cover_url, headers={"User-Agent": USER_AGENT_BROWSER}, timeout=8)
             if r.status_code == 200 and len(r.content) > 500:
                 cover_bytes = ensure_square_jpeg(r.content)
-                cover_file = os.path.join(temp_dir, "cover.jpg")
-                with open(cover_file, "wb") as f:
-                    f.write(cover_bytes)
         except Exception:
             pass
 
@@ -185,6 +165,10 @@ def process_and_package_track(
         "fragment_retries": 10,
     }
 
+    cookie_path = get_cookie_file(temp_dir)
+    if cookie_path:
+        ydl_opts["cookiefile"] = cookie_path
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([query])
@@ -193,7 +177,7 @@ def process_and_package_track(
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([fallback_query])
 
-    # Find raw downloaded file
+    # Locate raw downloaded file
     raw_file = None
     for f in os.listdir(temp_dir):
         if f.startswith("raw."):
@@ -211,58 +195,71 @@ def process_and_package_track(
     output_filename = f"{track_str} - {sanitized_title}.{out_ext}"
     final_output_path = os.path.join(temp_dir, output_filename)
 
-    # 4. Native FFmpeg remux & embed metadata
-    ffmpeg_cmd = ["ffmpeg", "-y", "-i", raw_file]
-
+    # 4. Lossless FFmpeg remux & authoritative Mutagen tagging
     if out_ext == "opus":
-        if raw_ext == "webm" or raw_ext == "opus":
-            ffmpeg_cmd.extend(["-c:a", "copy"])
+        if raw_ext in ["webm", "opus"]:
+            ffmpeg_cmd = ["ffmpeg", "-y", "-i", raw_file, "-vn", "-c:a", "copy", final_output_path]
         else:
-            ffmpeg_cmd.extend(["-c:a", "libopus", "-b:a", "160k"])
+            ffmpeg_cmd = ["ffmpeg", "-y", "-i", raw_file, "-vn", "-c:a", "libopus", "-b:a", "160k", final_output_path]
+        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        ffmpeg_cmd.extend([
-            "-metadata", f"title={title}",
-            "-metadata", f"artist={artist}",
-            "-metadata", f"album_artist={artist}",
-            "-metadata", f"album={final_album}",
-            "-metadata", f"track={final_track_no}",
-        ])
+        # Mutagen VorbisComment tagging
+        audio = OggOpus(final_output_path)
+        audio["TITLE"] = [title]
+        audio["ARTIST"] = [artist]
+        audio["ALBUM"] = [final_album]
+        audio["ALBUMARTIST"] = [artist]
         if year:
-            ffmpeg_cmd.extend(["-metadata", f"date={year}"])
-
+            audio["DATE"] = [str(year)]
+            audio["YEAR"] = [str(year)]
+        audio["TRACKNUMBER"] = [str(final_track_no)]
+        if lyrics:
+            audio["LYRICS"] = [lyrics]
         if cover_bytes:
-            pic_block = build_flac_picture_block(cover_bytes)
-            ffmpeg_cmd.extend(["-metadata", f"METADATA_BLOCK_PICTURE={pic_block}"])
+            pic = Picture()
+            pic.type = 3
+            pic.mime = "image/jpeg"
+            pic.desc = "Front Cover"
+            pic.data = cover_bytes
+            audio["metadata_block_picture"] = [base64.b64encode(pic.write()).decode("ascii")]
+        audio.save()
 
     elif out_ext == "m4a":
         if raw_ext == "m4a":
-            ffmpeg_cmd.extend(["-c:a", "copy"])
+            ffmpeg_cmd = ["ffmpeg", "-y", "-i", raw_file, "-vn", "-c:a", "copy", final_output_path]
         else:
-            ffmpeg_cmd.extend(["-c:a", "aac", "-b:a", "256k"])
+            ffmpeg_cmd = ["ffmpeg", "-y", "-i", raw_file, "-vn", "-c:a", "aac", "-b:a", "256k", final_output_path]
+        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        ffmpeg_cmd.extend([
-            "-metadata", f"title={title}",
-            "-metadata", f"artist={artist}",
-            "-metadata", f"album_artist={artist}",
-            "-metadata", f"album={final_album}",
-            "-metadata", f"track={final_track_no}",
-        ])
+        audio = MP4(final_output_path)
+        audio["\xa9nam"] = [title]
+        audio["\xa9ART"] = [artist]
+        audio["\xa9alb"] = [final_album]
         if year:
-            ffmpeg_cmd.extend(["-metadata", f"date={year}"])
+            audio["\xa9day"] = [str(year)]
+        audio["trkn"] = [(final_track_no, 0)]
+        if lyrics:
+            audio["\xa9lyr"] = [lyrics]
+        if cover_bytes:
+            audio["covr"] = [MP4Cover(cover_bytes, imageformat=MP4Cover.FORMAT_JPEG)]
+        audio.save()
 
     else:  # mp3
-        ffmpeg_cmd.extend([
-            "-c:a", "libmp3lame", "-b:a", "320k",
-            "-metadata", f"title={title}",
-            "-metadata", f"artist={artist}",
-            "-metadata", f"album={final_album}",
-            "-metadata", f"track={final_track_no}",
-        ])
+        ffmpeg_cmd = ["ffmpeg", "-y", "-i", raw_file, "-vn", "-c:a", "libmp3lame", "-b:a", "320k", final_output_path]
+        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    ffmpeg_cmd.append(final_output_path)
-    res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"FFmpeg packaging failed: {res.stderr}")
+        audio = ID3(final_output_path)
+        audio.add(TIT2(encoding=3, text=title))
+        audio.add(TPE1(encoding=3, text=artist))
+        audio.add(TALB(encoding=3, text=final_album))
+        if year:
+            audio.add(TDRC(encoding=3, text=str(year)))
+        audio.add(TRCK(encoding=3, text=str(final_track_no)))
+        if lyrics:
+            audio.add(USLT(encoding=3, lang="eng", desc="lyrics", text=lyrics))
+        if cover_bytes:
+            audio.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Front Cover", data=cover_bytes))
+        audio.save()
 
     return final_output_path, output_filename, lyrics, temp_dir
 
@@ -341,4 +338,3 @@ def download_post(
         filename=filename,
         headers=headers,
     )
-
