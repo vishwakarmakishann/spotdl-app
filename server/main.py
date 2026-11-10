@@ -154,7 +154,7 @@ def process_and_package_track(
     raw_template = os.path.join(temp_dir, "raw.%(ext)s")
 
     ydl_opts = {
-        "format": "141/251/bestaudio[ext=webm]/140/bestaudio/best",
+        "format": "141/251/bestaudio[ext=webm]/140/bestaudio/ba/b",
         "outtmpl": raw_template,
         "quiet": True,
         "no_warnings": True,
@@ -163,7 +163,16 @@ def process_and_package_track(
         "socket_timeout": 30,
         "retries": 10,
         "fragment_retries": 10,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "web"]
+            }
+        },
     }
+
+    node_bin = shutil.which("node")
+    if node_bin:
+        ydl_opts["js_runtimes"] = {"node": {"path": node_bin}}
 
     cookie_path = get_cookie_file(temp_dir)
     if cookie_path:
