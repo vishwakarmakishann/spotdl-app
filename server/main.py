@@ -219,31 +219,61 @@ def download_best_audio_stream(
 
     node_bin = shutil.which("node")
 
-    # Multi-tier download strategies
-    download_tiers: List[Dict[str, Any]] = [
-        # Tier 1: visionos + android_vr (bypasses SABR experiment, gives Opus 251 & AAC 140)
-        {
-            "format": "141/251/bestaudio[ext=webm]/140/bestaudio/ba/b",
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["visionos", "android_vr"],
-                }
+    # Multi-tier download strategies tailored for authenticated vs unauthenticated extraction
+    download_tiers: List[Dict[str, Any]] = []
+
+    if cookie_path and os.path.isfile(cookie_path):
+        # Authenticated tiers (cookies present)
+        download_tiers.extend([
+            {
+                "format": "141/251/bestaudio[ext=webm]/140/bestaudio/ba/b",
+                "cookiefile": cookie_path,
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["web_music", "web"],
+                    }
+                },
             },
-        },
-        # Tier 2: tv_samsung + web fallback
-        {
-            "format": "bestaudio/best",
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["tv_samsung", "web"],
-                }
+            {
+                "format": "bestaudio/best",
+                "cookiefile": cookie_path,
             },
-        },
-        # Tier 3: standard default
-        {
-            "format": "bestaudio/best",
-        },
-    ]
+            # Fallback: try unauthenticated visionos (in case cookie is rotated/expired)
+            {
+                "format": "141/251/bestaudio[ext=webm]/140/bestaudio/ba/b",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["visionos", "android_vr"],
+                    }
+                },
+            },
+            {
+                "format": "bestaudio/best",
+            },
+        ])
+    else:
+        # Unauthenticated tiers (no cookies)
+        download_tiers.extend([
+            {
+                "format": "141/251/bestaudio[ext=webm]/140/bestaudio/ba/b",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["visionos", "android_vr"],
+                    }
+                },
+            },
+            {
+                "format": "bestaudio/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["tv_samsung", "web"],
+                    }
+                },
+            },
+            {
+                "format": "bestaudio/best",
+            },
+        ])
 
     last_error: Optional[Exception] = None
     seen_ids = set()
@@ -284,9 +314,6 @@ def download_best_audio_stream(
 
                     if node_bin:
                         down_opts["js_runtimes"] = {"node": {"path": node_bin}}
-
-                    if cookie_path and os.path.isfile(cookie_path):
-                        down_opts["cookiefile"] = cookie_path
 
                     with yt_dlp.YoutubeDL(down_opts) as dl:
                         dl.download([vid_url])
@@ -501,37 +528,72 @@ def download_post(
 @app.get("/api/inspect")
 def inspect_track(v: Optional[str] = "pyGU-UudvrM", q: Optional[str] = None):
     """
-    Diagnostic endpoint to inspect format availability from Render datacenter.
+    Diagnostic endpoint to inspect environment cookies and format extraction on Render.
     """
+    raw_cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
     target = f"https://www.youtube.com/watch?v={v}" if v else f"ytsearch1:{q}"
-    opts = {
-        "quiet": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["visionos", "android_vr"],
-            }
-        },
+
+    diag: Dict[str, Any] = {
+        "raw_cookie_length": len(raw_cookies),
+        "raw_cookie_lines": len(raw_cookies.splitlines()),
+        "auth_keywords_present": [k for k in ["LOGIN_INFO", "SID", "SSID", "__Secure-1PSID", "__Secure-3PSID", "__Secure-YNTD"] if k in raw_cookies],
     }
+
+    # Test cookie parsing
+    temp_dir = tempfile.mkdtemp(prefix="spotdl_diag_")
+    cpath = os.path.join(temp_dir, "test_cookies.txt")
+    
+    # Write normalized cookies
+    normalized = raw_cookies.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r\n", "\n")
+    if not normalized.startswith("# Netscape HTTP Cookie File"):
+        normalized = "# Netscape HTTP Cookie File\n" + normalized
+    
+    with open(cpath, "w", encoding="utf-8") as f:
+        f.write(normalized)
+
+    parsed_cookies = []
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(target, download=False)
-            formats = [
-                {
-                    "id": f.get("format_id"),
-                    "ext": f.get("ext"),
-                    "acodec": f.get("acodec"),
-                    "vcodec": f.get("vcodec"),
-                    "abr": f.get("abr"),
-                    "has_url": bool(f.get("url")),
-                }
-                for f in info.get("formats", [])
-                if f.get("acodec") != "none"
-            ]
-            return {
-                "status": "success",
-                "title": info.get("title"),
-                "audio_formats_count": len(formats),
-                "audio_formats": formats,
-            }
+        cj = MozillaCookieJar(cpath)
+        cj.load(ignore_discard=True, ignore_expires=True)
+        parsed_cookies = [c.name for c in cj]
+        diag["cookiejar_parsed_count"] = len(parsed_cookies)
+        diag["parsed_cookie_names"] = parsed_cookies[:15]
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        diag["cookiejar_error"] = str(e)
+
+    # Test 1: Extract with cookies using default clients
+    try:
+        opts_with_cookie = {
+            "quiet": True,
+            "cookiefile": cpath,
+        }
+        with yt_dlp.YoutubeDL(opts_with_cookie) as ydl:
+            info = ydl.extract_info(target, download=False)
+            fmts = [f.get("format_id") for f in info.get("formats", []) if f.get("acodec") != "none"]
+            diag["extract_with_cookies_status"] = "success"
+            diag["extract_with_cookies_audio_formats"] = fmts
+    except Exception as e:
+        diag["extract_with_cookies_status"] = "error"
+        diag["extract_with_cookies_error"] = str(e)
+
+    # Test 2: Extract without cookies using visionos
+    try:
+        opts_no_cookie = {
+            "quiet": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["visionos", "android_vr"],
+                }
+            },
+        }
+        with yt_dlp.YoutubeDL(opts_no_cookie) as ydl:
+            info = ydl.extract_info(target, download=False)
+            fmts = [f.get("format_id") for f in info.get("formats", []) if f.get("acodec") != "none"]
+            diag["extract_no_cookies_visionos_status"] = "success"
+            diag["extract_no_cookies_audio_formats"] = fmts
+    except Exception as e:
+        diag["extract_no_cookies_visionos_status"] = "error"
+        diag["extract_no_cookies_error"] = str(e)
+
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    return diag
