@@ -5,7 +5,7 @@ import shutil
 import urllib.parse
 import tempfile
 import subprocess
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from io import BytesIO
 from http.cookiejar import MozillaCookieJar
 
@@ -37,20 +37,22 @@ def read_root():
     return {
         "service": "spotdl-cloud-server",
         "status": "healthy",
-        "endpoints": ["/health", "/api/download"],
+        "endpoints": ["/health", "/api/download", "/api/inspect"],
     }
 
 
 @app.get("/health")
 def health_check():
-    has_cookies = bool(os.environ.get("YOUTUBE_COOKIES", "").strip())
+    raw_cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    has_auth_cookies = any(k in raw_cookies for k in ["LOGIN_INFO", "SID", "SSID", "__Secure-1PSID", "__Secure-3PSID"])
     return {
         "status": "ok",
         "version": "1.0.0",
         "engine": "spotdl-cloud-server",
         "has_ffmpeg": has_binary("ffmpeg"),
         "has_nodejs": has_binary("node"),
-        "has_youtube_cookies": has_cookies,
+        "has_youtube_cookies": bool(raw_cookies),
+        "has_valid_auth_cookies": has_auth_cookies,
     }
 
 
@@ -169,43 +171,25 @@ def sanitize_netscape_cookies(raw_text: str) -> Optional[str]:
 
 def get_cookie_file(target_dir: str) -> Optional[str]:
     raw_cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if not raw_cookies:
+        return None
+
+    # CRITICAL: Only attach cookiefile if real authenticated session cookies exist.
+    # Passing single/visitor cookies like __Secure-YNTD triggers yt-dlp's is_authenticated=True,
+    # which causes yt-dlp to strip out visionos/android_vr clients (which don't support cookies),
+    # dropping all playable formats on datacenter IPs.
+    has_auth_cookies = any(k in raw_cookies for k in ["LOGIN_INFO", "SID", "SSID", "__Secure-1PSID", "__Secure-3PSID"])
+    if not has_auth_cookies:
+        return None
+
     clean_cookies = sanitize_netscape_cookies(raw_cookies)
     if not clean_cookies:
         return None
+
     path = os.path.join(target_dir, "youtube_cookies.txt")
     with open(path, "w", encoding="utf-8") as f:
         f.write(clean_cookies)
     return path
-
-
-def get_yt_dlp_opts(temp_dir: str, cookie_path: Optional[str] = None) -> Dict[str, Any]:
-    opts: Dict[str, Any] = {
-        "format": "141/251/bestaudio[ext=webm]/140/bestaudio/ba/b",
-        "quiet": True,
-        "no_warnings": True,
-        "noprogress": True,
-        "noplaylist": True,
-        "socket_timeout": 30,
-        "retries": 10,
-        "fragment_retries": 10,
-        "extractor_args": {
-            "youtube": {
-                # visionos and android_vr bypass the SABR-only experiment (issue #12482)
-                # and provide direct HTTPS Opus (251) and M4A (140) bitstreams without bot blocks.
-                "player_client": ["visionos", "android_vr", "tv_simply", "web"],
-                "player_skip": ["configs"],
-            }
-        },
-    }
-
-    node_bin = shutil.which("node")
-    if node_bin:
-        opts["js_runtimes"] = {"node": {"path": node_bin}}
-
-    if cookie_path and os.path.isfile(cookie_path):
-        opts["cookiefile"] = cookie_path
-
-    return opts
 
 
 def download_best_audio_stream(
@@ -215,8 +199,8 @@ def download_best_audio_stream(
     cookie_path: Optional[str] = None,
 ) -> str:
     """
-    Iterates through candidate search results across topic, audio, and standard queries,
-    downloading the first playable high-fidelity audio stream.
+    Searches using flat extraction to discover candidates without format-check crashes.
+    Iterates through candidate videos using resilient multi-tier client strategies.
     """
     queries = [
         f"ytsearch5:{clean_artist} - {clean_title} Topic",
@@ -224,43 +208,99 @@ def download_best_audio_stream(
         f"ytsearch5:{clean_artist} {clean_title}",
     ]
 
-    base_opts = get_yt_dlp_opts(temp_dir, cookie_path)
+    # Search options MUST use extract_flat to avoid format evaluation during search
+    search_opts: Dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "noplaylist": True,
+        "socket_timeout": 20,
+    }
+
+    node_bin = shutil.which("node")
+
+    # Multi-tier download strategies
+    download_tiers: List[Dict[str, Any]] = [
+        # Tier 1: visionos + android_vr (bypasses SABR experiment, gives Opus 251 & AAC 140)
+        {
+            "format": "141/251/bestaudio[ext=webm]/140/bestaudio/ba/b",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["visionos", "android_vr"],
+                }
+            },
+        },
+        # Tier 2: tv_samsung + web fallback
+        {
+            "format": "bestaudio/best",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["tv_samsung", "web"],
+                }
+            },
+        },
+        # Tier 3: standard default
+        {
+            "format": "bestaudio/best",
+        },
+    ]
+
     last_error: Optional[Exception] = None
+    seen_ids = set()
 
     for query in queries:
         try:
-            with yt_dlp.YoutubeDL(base_opts) as ydl:
-                info = ydl.extract_info(query, download=False)
-                entries = info.get("entries", []) if info else []
-                if not entries:
-                    continue
-
-                for entry in entries:
-                    if not entry:
-                        continue
-                    vid_url = (
-                        entry.get("webpage_url")
-                        or entry.get("original_url")
-                        or f"https://www.youtube.com/watch?v={entry.get('id')}"
-                    )
-
-                    try:
-                        down_opts = dict(base_opts)
-                        down_opts["outtmpl"] = os.path.join(temp_dir, "raw.%(ext)s")
-                        with yt_dlp.YoutubeDL(down_opts) as dl:
-                            dl.download([vid_url])
-
-                        for f in os.listdir(temp_dir):
-                            if f.startswith("raw."):
-                                return os.path.join(temp_dir, f)
-                    except Exception as e:
-                        last_error = e
-                        continue
+            with yt_dlp.YoutubeDL(search_opts) as ydl_search:
+                search_res = ydl_search.extract_info(query, download=False)
+                entries = search_res.get("entries", []) if search_res else []
         except Exception as e:
             last_error = e
             continue
 
-    err_msg = str(last_error) if last_error else "Audio stream extraction failed"
+        for entry in entries:
+            if not entry:
+                continue
+            vid_id = entry.get("id")
+            if not vid_id or vid_id in seen_ids:
+                continue
+            seen_ids.add(vid_id)
+
+            vid_url = f"https://www.youtube.com/watch?v={vid_id}"
+
+            # Try each download tier for this candidate
+            for tier in download_tiers:
+                try:
+                    down_opts: Dict[str, Any] = {
+                        "quiet": True,
+                        "no_warnings": True,
+                        "noprogress": True,
+                        "noplaylist": True,
+                        "socket_timeout": 30,
+                        "retries": 5,
+                        "fragment_retries": 5,
+                        "outtmpl": os.path.join(temp_dir, "raw.%(ext)s"),
+                        **tier,
+                    }
+
+                    if node_bin:
+                        down_opts["js_runtimes"] = {"node": {"path": node_bin}}
+
+                    if cookie_path and os.path.isfile(cookie_path):
+                        down_opts["cookiefile"] = cookie_path
+
+                    with yt_dlp.YoutubeDL(down_opts) as dl:
+                        dl.download([vid_url])
+
+                    # Check if audio was downloaded successfully
+                    for f in os.listdir(temp_dir):
+                        if f.startswith("raw."):
+                            return os.path.join(temp_dir, f)
+
+                except Exception as e:
+                    last_error = e
+                    continue
+
+    err_msg = str(last_error) if last_error else "Audio stream extraction failed across all candidates."
     raise HTTPException(status_code=500, detail=f"Failed to download audio stream: {err_msg}")
 
 
@@ -456,3 +496,42 @@ def download_post(
         filename=filename,
         headers=headers,
     )
+
+
+@app.get("/api/inspect")
+def inspect_track(v: Optional[str] = "pyGU-UudvrM", q: Optional[str] = None):
+    """
+    Diagnostic endpoint to inspect format availability from Render datacenter.
+    """
+    target = f"https://www.youtube.com/watch?v={v}" if v else f"ytsearch1:{q}"
+    opts = {
+        "quiet": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["visionos", "android_vr"],
+            }
+        },
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(target, download=False)
+            formats = [
+                {
+                    "id": f.get("format_id"),
+                    "ext": f.get("ext"),
+                    "acodec": f.get("acodec"),
+                    "vcodec": f.get("vcodec"),
+                    "abr": f.get("abr"),
+                    "has_url": bool(f.get("url")),
+                }
+                for f in info.get("formats", [])
+                if f.get("acodec") != "none"
+            ]
+            return {
+                "status": "success",
+                "title": info.get("title"),
+                "audio_formats_count": len(formats),
+                "audio_formats": formats,
+            }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
